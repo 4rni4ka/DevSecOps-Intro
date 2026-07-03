@@ -101,36 +101,43 @@ networkpolicy.networking.k8s.io/juice-shop-restricted created
 service/juice-shop created
 deployment.apps/juice-shop created          # ← no PSS warning = restricted-compliant
 ```
+Also confirmed the enforcement is *live*, not just declarative: a `kubectl run` of a plain
+(non-compliant) pod into the namespace is **rejected at admission**:
 ```
-NAME                          READY   STATUS     RESTARTS   AGE
-juice-shop-686f49cc7f-sqtqz   0/1     Init:0/1   0          ...   # initContainer seeding /juice-shop
+Error from server (Forbidden): pods "cdtest" is forbidden: violates PodSecurity "restricted:latest":
+  allowPrivilegeEscalation != false, unrestricted capabilities, runAsNonRoot != true, seccompProfile ...
 ```
+So the restricted profile is both **satisfied by our Deployment** and **actively blocking** anything
+that isn't — the core Task 2 requirement.
 
-> ⚠️ **Final `Running 1/1` + `trivy k8s` output not captured:** the local Docker Desktop engine
-> crashed under the combined load (kind control-plane + the ~600 MB initContainer copy + Juice Shop)
-> before the pod finished initialising — the same WSL2 engine instability seen in Lab 5. The spec is
-> validated (applies clean, PSS-compliant, initContainer running); the two commands below just need a
-> re-run on a stable engine to capture the final evidence:
+> ⚠️ **`Running 1/1` + `trivy k8s` not captured — root cause isolated to the environment, not the
+> hardening.** The pod never reached Ready, and I traced why: (1) the local Docker Desktop engine
+> repeatedly crashed under kind load (same WSL2 instability as Lab 5); and (2) more fundamentally,
+> **a bare `juice-shop` Deployment with _no_ volumes and _no_ hardening also fails** in this kind /
+> containerd cluster — the distroless image's first startup gate, `validateDependenciesBasic.ts`
+> (`await import('check-dependencies')`), throws and prints *"Please run npm install…"*, even though
+> the **identical image runs fine under Docker**. This is an image↔containerd-runtime quirk on this
+> machine, independent of the securityContext or the volume design (proven by the minimal repro).
+> The manifest itself is validated: it applies clean, is PSS-restricted-compliant, and the
+> initContainer completes (`exitCode 0`). On a standard cluster the finish-line commands are:
 > ```bash
 > kubectl -n juice-shop wait --for=condition=ready pod -l app=juice-shop --timeout=300s
-> kubectl -n juice-shop get pod -l app=juice-shop
 > trivy k8s --include-namespaces juice-shop --severity HIGH,CRITICAL --report=summary
 > ```
-> Expected: pod `Running 1/1`; `trivy k8s` reports the same image CVEs (5 Critical / 43 High) with
-> **zero K8s-misconfiguration** HIGH/CRITICAL, because PSS restricted + the securityContext above
-> close every workload-level misconfig check.
 
 ### What broke and how I fixed it (readOnlyRootFilesystem)
-`readOnlyRootFilesystem: true` breaks Juice Shop v20. I reproduced it with
-`docker run --read-only` and watched it fail progressively: it copies seed files into
-**`/juice-shop/ftp`**, opens its SQLite DB under **`/juice-shop/data`**, copies promo assets into
-**`/juice-shop/frontend/dist/...`**, and writes **`/juice-shop/.well-known/csaf/...`** — i.e. it
-writes all over its own install tree at startup, not just `/tmp`. The lab hint's "mount `/tmp` +
-logs" is not enough for v20. The clean fix: an **initContainer** (`node -e fs.cpSync`) copies the
-whole `/juice-shop` into a writable `emptyDir` owned by uid 1000, which the main container then
-mounts at `/juice-shop`; `fsGroup: 1000` gives the pod write access. The container root stays
-read-only — the app only writes inside its mounted volume (+ an `emptyDir` at `/tmp`). Verified via
-`docker run --read-only -v <vol>:/juice-shop --tmpfs /tmp` that the app clears every EROFS error.
+`readOnlyRootFilesystem: true` genuinely breaks Juice Shop v20 — it writes all over its own install
+tree at startup, not just `/tmp`. I enumerated the exact paths two ways — `docker run --read-only`
+(watching each EROFS in turn) and reading the source (`lib/startup/restoreOverwrittenFilesWithOriginals.ts`,
+which copies `data/static/*` into `ftp/`, `i18n/`, and `frontend/dist/.../videos/`). The full writable
+set for v20 is: `/tmp`, `/juice-shop/ftp`, `/juice-shop/logs`, `/juice-shop/data` (SQLite DB **and**
+read-only seed files it needs), `/juice-shop/.well-known`, `/juice-shop/i18n`, and
+`/juice-shop/frontend/dist/frontend/assets/public/videos`. The fix in `deployment.yaml`: a writable
+`emptyDir` at each, plus an **initContainer** that copies *only* `/juice-shop/data` (small — no
+`node_modules`) into its emptyDir so the seeds survive alongside the writable SQLite path; `node_modules`
+and `build/` stay on the read-only image layer. `fsGroup: 1000` gives the pod ownership of the volumes.
+The container root stays read-only. (The whole-tree-copy alternative also works but drags ~600 MB of
+`node_modules` through an initContainer on every start — the per-path seed is leaner.)
 
 ---
 
