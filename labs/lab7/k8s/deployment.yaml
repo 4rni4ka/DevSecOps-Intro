@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: juice-shop
+  namespace: juice-shop
+  labels:
+    app: juice-shop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: juice-shop
+  template:
+    metadata:
+      labels:
+        app: juice-shop
+    spec:
+      serviceAccountName: juice-shop
+      automountServiceAccountToken: false
+      # Pod-level securityContext (PSS restricted)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000                     # makes the emptyDir volumes group-owned by 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # readOnlyRootFilesystem: true breaks Juice Shop — at startup it copies files across its
+      # own tree (/juice-shop/ftp, /juice-shop/data (sqlite), /juice-shop/frontend/dist/...,
+      # /juice-shop/.well-known). Instead of enumerating every path, we seed a writable emptyDir
+      # with a copy of the whole /juice-shop dir (owned by uid 1000) and mount it over /juice-shop.
+      # The container root stays read-only; the app writes only inside its own mounted volume.
+      initContainers:
+        - name: seed-app
+          image: bkimminich/juice-shop@sha256:fd58bdc9745416afce8184ee0666278a436574633ea7880365153a63bfd418b0
+          # Node is the only binary in this distroless image — use fs.cpSync to copy the app.
+          command: ["node", "-e", "require('fs').cpSync('/juice-shop','/seed',{recursive:true})"]
+          volumeMounts:
+            - name: app
+              mountPath: /seed
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+
+      containers:
+        - name: juice-shop
+          image: bkimminich/juice-shop@sha256:fd58bdc9745416afce8184ee0666278a436574633ea7880365153a63bfd418b0
+          ports:
+            - containerPort: 3000
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+          volumeMounts:
+            - name: app                    # writable copy of the whole app (from initContainer)
+              mountPath: /juice-shop
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 60
+            periodSeconds: 20
+
+      volumes:
+        - name: app
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
