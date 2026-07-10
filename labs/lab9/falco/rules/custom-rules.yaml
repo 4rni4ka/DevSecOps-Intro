@@ -1,0 +1,30 @@
+# Lab 9 — custom Falco rules (loaded from /etc/falco/rules.d/)
+
+# --- Task 1: detect writes to /tmp inside any container ---
+- rule: Write to /tmp by container
+  desc: A process inside a container wrote to /tmp — often container drift / dropped tooling.
+  condition: >
+    open_write and container and fd.name startswith /tmp/
+  output: >
+    Write to /tmp by container
+    (container=%container.name user=%user.name file=%fd.name cmd=%proc.cmdline image=%container.image.repository)
+  priority: WARNING
+  tags: [container, drift]
+
+# --- Bonus: detect cryptominer network/process pattern (>=2 indicators) ---
+- rule: Possible Cryptominer Activity
+  desc: >
+    Container either connected to a well-known mining-pool port OR ran a known miner binary.
+    Combines two independent indicators (destination port + process name).
+  condition: >
+    container and
+    (
+      (evt.type in (connect, sendto) and fd.sport in (3333, 4444, 5555, 7777, 14444, 19999, 45700))
+      or
+      (spawned_process and proc.name in (xmrig, ethminer, cgminer, t-rex, claymore, minerd, nbminer))
+    )
+  output: >
+    Possible cryptominer activity
+    (container=%container.name proc=%proc.name cmd=%proc.cmdline target=%fd.name port=%fd.sport)
+  priority: CRITICAL
+  tags: [container, mitre_execution, mitre_command_and_control]
