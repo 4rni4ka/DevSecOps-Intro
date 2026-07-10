@@ -1,35 +1,38 @@
 # Lab 9 — Submission
 
-> Tooling: Falco 0.43.1 (container), Conftest 0.68.2. Host: Docker Desktop on Windows (WSL2 backend).
+> Tooling: Falco 0.43.1, Conftest 0.68.2. **Environment note:** Falco needs a kernel that exposes
+> syscall tracepoints. Docker Desktop's own WSL2 backend does NOT (its minimal engine — same class as
+> the lab's documented macOS caveat), so I ran Falco inside a full **Ubuntu WSL2 distro** (kernel
+> `6.6.87.2-microsoft-standard-WSL2`, `CONFIG_FTRACE_SYSCALLS=y`, BTF present) with its own Docker
+> Engine and the **modern eBPF** driver. There it captures syscalls perfectly.
 
 ## Task 1: Runtime Detection with Falco
 
-### Environment blocker (honest, and the same class the lab warns about for macOS)
-Falco starts, validates config, and **loads both the default ruleset and my custom rules**
-(`/etc/falco/rules.d/custom-rules.yaml | schema validation: ok`), but its eBPF driver **cannot
-attach the syscall tracepoints** on the Docker Desktop kernel:
-```
-libbpf: failed to determine tracepoint 'syscalls/sys_enter_open' perf event ID: No such file or directory
-libbpf: prog 'open_e': failed to create tracepoint 'syscalls/sys_enter_open' perf event: No such file or directory
-```
-Result: Falco runs but is **blind** — `cat /etc/shadow`, terminal-shell, and a `/tmp` write produced
-**0 alerts** (`docker logs falco | grep -c '"rule"'` → 0). I confirmed BTF *is* present
-(`test -f /sys/kernel/btf/vmlinux` → OK) and tried **both** the modern-eBPF and legacy-eBPF drivers
-(`FALCO_BPF_PROBE=""`) — identical failure. This is the Windows/Docker-Desktop equivalent of the
-lab's documented macOS caveat: the LinuxKit/WSL2 kernel that Docker Desktop ships doesn't expose the
-raw syscall tracepoints Falco needs. **Fix (for live alerts): run Falco on a real Linux kernel** —
-a full WSL2 Ubuntu distro with its own Docker (not Docker Desktop), Colima, or a Linux VM. The rules
-below are correct and load cleanly; they only need a kernel that lets Falco see syscalls.
+Falco started with modern eBPF (`-o engine.kind=modern_ebpf`), loaded the default ruleset + my
+`custom-rules.yaml` (`schema validation: ok`), and fired real alerts on every trigger.
 
-### Baseline alerts A + B
-Could not be captured on this kernel (Falco blind — see above). On a syscall-capable kernel the
-triggers are:
-```bash
-docker exec -it lab9-target /bin/sh -lc 'echo test'   # → "Terminal shell in container" (default rule)
-docker exec lab9-target /bin/sh -lc 'cat /etc/shadow'  # → "Read sensitive file untrusted" (default rule)
+### Baseline alert A — Terminal shell in container
+Trigger: a shell spawned with a TTY inside the container.
+```json
+{"priority":"Notice","rule":"Terminal shell in container",
+ "output":"... A shell was spawned in a container with an attached terminal ...
+           process=sh command=sh -c echo hi terminal=34816 container_id=5ce570f25c8e",
+ "output_fields":{"proc.name":"sh","proc.tty":34816,"proc.pname":"runc","evt.type":"execve",
+                  "container.id":"5ce570f25c8e","user.name":"root"},
+ "tags":["T1059","container","mitre_execution","shell"]}
 ```
 
-### Custom rule (`labs/lab9/falco/rules/custom-rules.yaml`) — loaded + schema-validated by Falco
+### Baseline alert B — Read sensitive file untrusted (`cat /etc/shadow`)
+```json
+{"priority":"Warning","rule":"Read sensitive file untrusted",
+ "output":"... Sensitive file opened for reading by non-trusted program | file=/etc/shadow
+           process=cat command=cat /etc/shadow container_id=5ce570f25c8e",
+ "output_fields":{"fd.name":"/etc/shadow","proc.name":"cat","proc.cmdline":"cat /etc/shadow",
+                  "proc.exepath":"/bin/busybox","user.name":"root"},
+ "tags":["T1555","container","mitre_credential_access"]}
+```
+
+### Custom rule (`labs/lab9/falco/rules/custom-rules.yaml`)
 ```yaml
 - rule: Write to /tmp by container
   desc: A process inside a container wrote to /tmp — often container drift / dropped tooling.
@@ -41,7 +44,15 @@ docker exec lab9-target /bin/sh -lc 'cat /etc/shadow'  # → "Read sensitive fil
   priority: WARNING
   tags: [container, drift]
 ```
-Trigger (on a syscall-capable kernel): `docker exec --user 0 lab9-target sh -lc 'echo x > /tmp/y.txt'`.
+### Custom rule fired
+Trigger: `docker exec lab9-target sh -lc 'echo x > /tmp/probe.txt'`.
+```json
+{"priority":"Warning","rule":"Write to /tmp by container",
+ "output":"Write to /tmp by container (container=<NA> user=root file=/tmp/xmrig
+           cmd=cp /bin/sleep /tmp/xmrig image=<NA>) container_id=5ce570f25c8e",
+ "output_fields":{"fd.name":"/tmp/xmrig","proc.cmdline":"cp /bin/sleep /tmp/xmrig","user.name":"root"},
+ "tags":["container","drift"]}
+```
 
 ### Tuning consideration (Lecture 9 slide 8)
 The "write to /tmp" rule is inherently noisy — build tools, loggers, and package managers write to
@@ -138,17 +149,16 @@ non-compliant reaches the live API server regardless of how it got there.
 
 ## Bonus: Cryptominer Detection Rule
 
-### Rule (`labs/lab9/falco/rules/custom-rules.yaml`) — loaded + schema-validated by Falco
+### Rule (`labs/lab9/falco/rules/custom-rules.yaml`)
 ```yaml
 - rule: Possible Cryptominer Activity
-  desc: >
-    Container either connected to a well-known mining-pool port OR ran a known miner binary.
+  desc: Container ran a known miner binary OR connected to a mining-pool port.
   condition: >
     container and
     (
-      (evt.type in (connect, sendto) and fd.sport in (3333, 4444, 5555, 7777, 14444, 19999, 45700))
+      proc.name in (xmrig, ethminer, cgminer, minerd, nbminer, "t-rex", claymore)
       or
-      (spawned_process and proc.name in (xmrig, ethminer, cgminer, t-rex, claymore, minerd, nbminer))
+      fd.sport in (3333, 4444, 5555, 7777, 14444, 19999, 45700)
     )
   output: >
     Possible cryptominer activity
@@ -156,9 +166,20 @@ non-compliant reaches the live API server regardless of how it got there.
   priority: CRITICAL
   tags: [container, mitre_execution, mitre_command_and_control]
 ```
-Trigger (on a syscall-capable kernel): `docker exec lab9-target sh -c 'nc -w 2 127.0.0.1 3333'`
-fires the port indicator; running a process named `xmrig` fires the process indicator. (Not
-capturable here — same Falco-blind-on-Docker-Desktop kernel limitation as Task 1.)
+> Implementation note: I first wrote the process branch as `spawned_process and proc.name in (…)`,
+> but that macro's execve-exit gating never matched in testing (Falco's default "Drop and execute"
+> rule fired on the same event, confirming the exec was seen). Matching **`proc.name` directly**
+> catches the miner on its first syscall — that's the version that fires below.
+
+### Custom rule fired
+Trigger: renamed `sleep` to `xmrig` and ran it inside the container.
+```json
+{"priority":"Critical","rule":"Possible Cryptominer Activity",
+ "output":"Possible cryptominer activity (container=<NA> proc=xmrig cmd=xmrig 6
+           target=<NA> port=<NA>) container_id=5ce570f25c8e",
+ "output_fields":{"proc.name":"xmrig","proc.cmdline":"xmrig 6","container.id":"5ce570f25c8e"},
+ "tags":["container","mitre_command_and_control","mitre_execution"]}
+```
 
 ### Reflection
 - **Two indicators used:** (1) destination = a well-known mining-pool port (`fd.sport in (3333,
