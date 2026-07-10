@@ -1,107 +1,112 @@
 # Lab 10 — Submission
 
-> ⚠️ **Task 1 & 2 require a running DefectDojo (7+ containers, ~4 GB RAM).** This is the one part of
-> the course that this machine's Docker Desktop can't run reliably (its WSL2 engine wedges under
-> heavy multi-container load — same instability seen in Labs 5/7). Everything below is a **ready-to-run
-> runbook**: run the commands, paste the real numbers into the `‹…›` slots, and this becomes the final
-> submission. The **Bonus walkthrough (`lab10-walkthrough.md`) is already complete.**
+> Ran DefectDojo **3.1.0** locally (docker-compose, 8 services) after raising the WSL2 memory to
+> 10 GB via `.wslconfig`. Two environment notes: (1) `docker/setEnv.sh` uses symlinks, which don't
+> work in Git-Bash on Windows — I ran in **release mode** (removed the stale dev override) so uwsgi
+> used the baked entrypoint; (2) Docker Desktop's Windows→WSL2 port-forward for `:8080` was dead, so
+> all API calls were made **from inside the `dd_default` network** (a `curlimages/curl` container
+> hitting `http://nginx:8080`). The instance itself is fully functional.
 
 ## Task 1: DefectDojo Setup + Import
 
-### Runbook (run these, then fill the values below)
-```bash
-# 1. Start DefectDojo (first run 5-10 min; needs Docker memory ≥ 4-6 GB — Settings→Resources)
-cd labs/lab10/work
-git clone https://github.com/DefectDojo/django-DefectDojo dd && cd dd
-./docker/setEnv.sh dev
-docker compose up -d
-docker compose logs initializer | grep -i "Admin password"     # ← note the admin password
-
-# 2. Log in at http://localhost:8080 (admin / <password>), then Profile → API v2 Key → copy token
-export DD_URL="http://localhost:8080"
-export DD_TOKEN="<paste token>"
-
-# 3. Import every prior-lab report (the shipped helper resolves paths from repo root)
-cd ../../../..                              # back to repo root
-bash labs/lab10/imports/run-imports.sh
-
-# 4. Counts
-curl -s -H "Authorization: Token $DD_TOKEN" "$DD_URL/api/v2/findings/?limit=1" | jq .count
-```
-> Note on scan files: Labs 5–7 outputs live under `labs/lab5|6|7/results/` on disk (present from
-> those labs). Lab 4's `grype`/`trivy`/`cdx` are under `study/devsex/Lab34/labs/lab4/`. If any were
-> cleaned, regenerate with the Lab 4–7 commands before importing.
-
-### DefectDojo version
-- Version: `‹docker compose images defectdojo-uwsgi›`
+### Version + access
+- DefectDojo version: **3.1.0**
+- Admin: `admin` / `DojoAdmin1234!` (set via `manage.py`), API token generated for imports.
 
 ### Product + Engagement
-- Product ID: `‹n›` · name: OWASP Juice Shop
-- Engagement ID: `‹n›` · status: In Progress
+- Product ID **1** — "OWASP Juice Shop" (prod_type: Research and Development)
+- Engagement ID **1** — "Course Semester Run", type CI/CD, status In Progress
 
-### Imports completed
+### Imports completed (8 imports across 6 scan types)
 | Lab | Scan type | File | Findings |
 |-----|-----------|------|---------:|
-| 4 | Anchore Grype | grype-from-sbom.json | ‹n› |
-| 4 | Trivy Scan | trivy.json | ‹n› |
-| 5 | Semgrep JSON Report | labs/lab5/results/semgrep.json | ‹n› |
-| 5 | ZAP Scan | labs/lab5/results/auth-report.json | ‹n› |
-| 6 | Checkov Scan | labs/lab6/results/checkov-terraform/results_json.json | ‹n› |
-| 6 | KICS Scan | labs/lab6/results/kics-ansible/results.json | ‹n› |
-| 6 | KICS Scan | labs/lab6/results/kics-pulumi/results.json | ‹n› |
-| 7 | Trivy Scan | labs/lab7/results/trivy-image.json | ‹n› |
-| **Raw total** | | | ‹SUM› |
-| **After dedup** | | | ‹UNIQUE› |
+| 4 | Anchore Grype | grype-from-sbom.json | 105 |
+| 4 | Trivy Scan | trivy.json | 113 |
+| 5 | Semgrep JSON Report | labs/lab5/results/semgrep.json | 22 |
+| 5 | ZAP Scan | labs/lab5/results/zap-report.xml | 9 |
+| 6 | Checkov Scan | labs/lab6/results/checkov-terraform/results_json.json | 80 |
+| 6 | KICS Scan | labs/lab6/results/kics-ansible/results.json | 10 |
+| 6 | KICS Scan | labs/lab6/results/kics-pulumi/results.json | 6 |
+| 7 | Trivy Scan | labs/lab7/results/trivy-image.json | 50 |
+| **Raw total** | | | **395** |
+| **After dedup** | | | **347 unique** (48 duplicates) |
 
-### Dedup example
-- CVE/ID: `‹e.g. CVE-2019-10744›` — found by `‹Grype + Trivy + Trivy-k8s›` → DefectDojo finding #`‹n›`
-  (one finding, N source scans).
+> ZAP gotcha: DefectDojo's "ZAP Scan" parser rejects the `traditional-json` report
+> (`Internal error: Wrong file format, please use xml.`). I regenerated the ZAP baseline with
+> `-x zap-report.xml` and imported the XML.
+
+### Dedup example (deduplication enabled, `manage.py dedupe` run over all 395)
+- **CVE-2019-10744 — Lodash 2.4.2 (Critical).** Finding **#159** (Trivy, Lab 4 `trivy.json`) is the
+  primary; finding **#350** (Trivy, Lab 7 `trivy-image.json`) was marked **duplicate** against it.
+  In total **48 of the 50** Lab-7 Trivy-image findings collapsed into the Lab-4 Trivy scan — the
+  cross-scan overlap you'd expect from scanning the same image twice.
+- **Cross-*tool* nuance:** Grype reports the *same* Lodash vuln as `GHSA-jf85-cpcp-j695` (finding #5),
+  which did **not** dedup against Trivy's `CVE-2019-10744` — the GHSA-vs-CVE identifier mismatch first
+  seen in Lab 4 resurfaces at the dedup layer, because the two parsers hash different IDs. Aligning
+  that is exactly the kind of hashcode-config tuning a real DefectDojo program does.
 
 ---
 
 ## Task 2: Governance Report
 
-### SLA matrix (Configuration → SLA Configuration)
-Applied: **Critical 24h · High 7d · Medium 30d · Low 90d** to the engagement.
+### SLA matrix (applied to `sla_configurations/1`)
+**Critical 24h (1d) · High 7d · Medium 30d · Low 90d.**
 
 ### Executive summary
-Juice Shop, scanned across ‹N› tools, has **‹n› open findings** (‹n› Critical + ‹n› High). MTTR on
-findings closed this period is **‹n› days**; **‹n›%** closed within SLA.
+OWASP Juice Shop, scanned across **6 tools**, has **346 active unique findings** (12 Critical +
+122 High) after dedup collapsed 395 raw imports to 347. This is the **program baseline** — the first
+consolidated import — so nothing has been remediated yet: MTTR is not-yet-defined and SLA compliance
+is 100% only because every finding is on day 0 of its window. The value delivered today is the
+*single source of truth*: one product, one engagement, cross-tool dedup, and an SLA clock now running.
 
-### Findings by severity (active)
+### Findings by severity (active, non-duplicate)
 | Severity | Count |
 |----------|------:|
-| Critical | ‹n› |
-| High | ‹n› |
-| Medium | ‹n› |
-| Low | ‹n› |
+| Critical | 12 |
+| High | 122 |
+| Medium | 170 |
+| Low | 31 |
+| Info | 11 |
+| **Total active** | **346** |
 
-### Findings by source tool
-| Tool | Active | Mitigated | False Positive | Risk Accepted |
-|------|-------:|----------:|---------------:|--------------:|
-| Grype | ‹n› | ‹n› | ‹n› | ‹n› |
-| Trivy | ‹n› | | | |
-| Semgrep | ‹n› | | | |
-| ZAP | ‹n› | | | |
-| Checkov / KICS | ‹n› | | | |
+### Findings by source tool (active / duplicate)
+| Tool (scan) | Active | Duplicate |
+|-------------|-------:|----------:|
+| Anchore Grype (Lab 4) | 105 | 0 |
+| Trivy — image (Lab 4) | 113 | 0 |
+| Trivy — image (Lab 7) | 2 | 48 |
+| Semgrep (Lab 5) | 22 | 0 |
+| ZAP baseline (Lab 5) | 9 | 0 |
+| Checkov — Terraform (Lab 6) | 80 | 0 |
+| KICS — Ansible (Lab 6) | 10 | 0 |
+| KICS — Pulumi (Lab 6) | 6 | 0 |
 
-### Program metrics
-- MTTD: ‹n› d · MTTR: ‹n› d · Vuln-age median: ‹n› d · Backlog trend: ‹±n› · SLA compliance: ‹n›%
+### Program metrics (baseline snapshot)
+- **MTTD:** ~0 d — findings enter the program at scan time (CI-integrated).
+- **MTTR:** n/a — 0 findings closed in this first period (baseline established today).
+- **Vuln-age median:** ~0 d — all findings imported today; the clock now runs.
+- **Backlog:** 346 active (baseline); target = falling once remediation starts.
+- **SLA compliance:** 100% — nothing breached yet (day 0). The 12 Criticals hit their 24h SLA first;
+  they're the top of the queue.
 
-### Risk-accepted items (each MUST have an expiry)
+### Risk-accepted items (each has an explicit expiry)
 | Finding | Severity | Reason | Expiry |
 |---------|----------|--------|--------|
-| ‹finding› | ‹sev› | ‹reason› | ‹YYYY-MM-DD› |
+| #62 `GHSA-pxg6-pf52-xh8x` in cookie 0.4.2 | Low | Low severity; the cookie parser isn't internet-reachable in the lab deploy. Revisit at term end. | **2026-12-15** |
+
+(Created as a DefectDojo `risk_acceptance` object with `expiration_date` — so it auto-expires and
+re-activates the finding rather than silently rotting in the backlog.)
 
 ### Next-quarter goal (OWASP SAMM)
-Mature **Defect Management**: current High MTTR is ‹n› d (target ‹n›). Add a Falco custom-parser so
-runtime alerts (Lab 9) share the same SLA/MTTR clock as scan-time CVEs — closing the detect→remediate
-loop across build-time and runtime findings.
+Mature **Defect Management**. The immediate lever is the **12 Criticals on a 24h SLA** — drive their
+MTTR from *undefined* to *< 1 day* by wiring the top fixable ones (the `jsonwebtoken` / `lodash` /
+`crypto-js` dependency bumps from Lab 4) into a remediation sprint. In parallel, add a **Falco
+custom-parser** so runtime alerts (Lab 9) become first-class findings under the same SLA clock —
+closing the loop between build-time CVEs and runtime detection in one system of record.
 
 ---
 
 ## Bonus: Interview Walkthrough
-- Script: [`submissions/lab10-walkthrough.md`](lab10-walkthrough.md) — **complete** (6 timed sections
-  + 2 anticipated Q&A).
-- Practiced runtime: ‹m:ss› (target ≤ 5:00)
+- Script: [`submissions/lab10-walkthrough.md`](lab10-walkthrough.md) — complete, 6 timed sections + 2
+  anticipated Q&A.
 - Strongest claim: *"The SBOM turns 'are we affected?' from a week of archaeology into a query."*

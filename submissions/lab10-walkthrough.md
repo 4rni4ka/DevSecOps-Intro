@@ -1,7 +1,7 @@
 # 5-Minute DevSecOps Program Walkthrough — OWASP Juice Shop
 
-> Delivery note: read aloud, this runs ~4:40. Numbers in `‹…›` come from my DefectDojo run
-> (Task 1/2) — I swap in the live figure before speaking.
+> Delivery note: read aloud, this runs ~4:40. All figures are from the real DefectDojo run in
+> Task 1/2 (395 raw → 347 unique findings across 6 tools).
 
 ## (0:00–0:30) Context
 I built an end-to-end DevSecOps program around **OWASP Juice Shop v20** as the target of record —
@@ -28,22 +28,26 @@ I'll walk the pipeline top to bottom:
   + Trivy-k8s into one finding, and applies the SLA matrix (24h / 7d / 30d / 90d).
 
 ## (2:00–3:00) Findings + closures
-- Across ‹N tools› I imported ‹RAW› raw findings that dedupped to **‹UNIQUE› unique** — the dedup
-  ratio alone is the argument for a system of record over per-tool spreadsheets.
+- Across **6 tools** I imported **395 raw findings that dedupped to 347 unique** — 48 collapsed, and
+  that dedup ratio alone is the argument for a system of record over per-tool spreadsheets.
 - **Strongest correlated finding:** SQL injection in `routes/login.ts` — **Semgrep flagged the sink
   statically** (tainted `req.body.email` concatenated into a raw `sequelize.query`) **and ZAP reached
   the same `/rest/user/login` endpoint dynamically**. Static says *where and why*, dynamic says *it's
-  actually exposed*. Fix: parameterised queries. That's my highest-confidence finding — two independent
-  tools, two angles, one root cause.
-- I risk-accepted ‹finding› until ‹date› because ‹reason› — and it has an **explicit expiry**, so it
-  can't silently rot in the backlog.
+  actually exposed*. Fix: parameterised queries. Two independent tools, two angles, one root cause.
+- **Dedup war-story:** the same Lodash `CVE-2019-10744` came in from Trivy *and* from Grype — but
+  Grype labelled it `GHSA-jf85-cpcp-j695`, so they *didn't* auto-merge. That GHSA-vs-CVE mismatch is
+  exactly the hashcode-tuning a real program owns.
+- I **risk-accepted one Low finding** (a cookie-parser advisory) **with a hard expiry of 2026-12-15** —
+  so it auto-reactivates instead of silently rotting in the backlog.
 
 ## (3:00–4:00) Metrics
-- **MTTR ‹n› days** on findings closed this term — I benchmark that against DORA Elite (< 1 day) and
-  I'm honest about the gap and the plan to close it.
-- **Vuln-age median ‹n› days**; **SLA compliance ‹n›%**; **backlog trend ‹stable/falling›**.
-- The point isn't the absolute numbers — it's that they *exist and trend*. "We closed ‹n› Criticals,
-  MTTR is moving down" is a program; "we ran some scanners" is not.
+- This is the **program baseline** — first consolidated import — so I'm honest: **346 active findings
+  (12 Critical, 122 High)**, MTTR not-yet-defined, SLA clock started today. No vanity numbers.
+- The 12 Criticals sit on a **24h SLA** and are top of the queue; the fixable ones (`jsonwebtoken`,
+  `lodash`, `crypto-js` bumps) are a one-sprint win I'd drive MTTR down with, benchmarked against
+  DORA Elite (< 1 day).
+- The point isn't the absolute numbers today — it's that they now *exist and trend*. A baseline with
+  an SLA clock is a program; "we ran some scanners" is not.
 
 ## (4:00–4:30) Next steps
 If I had another quarter I'd mature **OWASP SAMM → Defect Management**: wire Falco runtime alerts into
